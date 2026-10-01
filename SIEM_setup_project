@@ -1,0 +1,519 @@
+# Project: pfSense + Wazuh SOC Home Lab — Infrastructure Setup Only
+
+Status: Ready to start
+Started:
+Cost: $0
+Host Machine: Kali Linux (dual-booted, bare metal)
+
+
+## Scope of This Phase
+
+This phase covers **only building the infrastructure**. You will:
+
+- Install VirtualBox
+- Create the virtual network
+- Deploy pfSense
+- Deploy Wazuh
+- Deploy the target VM
+- Get all machines communicating
+
+You will not do any of the following yet. Those come in a later phase:
+
+- Writing firewall rules
+- Configuring Wazuh detection rules
+- Connecting pfSense logs to Wazuh
+- Installing Wazuh agents
+- Running attacks
+
+The goal right now is: the lab is alive and all machines can reach each other.
+
+## Part 1 — Architecture Overview
+
+Your Kali runs on bare metal. VirtualBox runs inside Kali. All lab machines run inside VirtualBox.
+
+Two networks inside VirtualBox:
+
+- NAT — used by pfSense for internet access.
+- labnet — an isolated internal network where the lab machines live.
+
+Machines:
+
+- pfSense — firewall and gateway.
+- Wazuh — SIEM server.
+- Target — Ubuntu Server that will later be monitored.
+- Kali — your host and attacker.
+
+IP layout on labnet:
+
+- pfSense LAN: 192.168.1.1
+- Wazuh VM: 192.168.1.10
+- Target VM: 192.168.1.20
+- DHCP range (for any other machines): 192.168.1.100 to 192.168.1.200
+
+Kali reaches the lab through a host-only adapter that you will later add to pfSense as an OPT interface.
+
+---
+
+## Part 2 — Hardware and Software Needed
+
+Hardware:
+
+- 4 CPU cores minimum, 8 preferred
+- 8 GB RAM minimum, 16 preferred
+- 60 GB free disk minimum, 120 preferred
+
+Software to install:
+
+- VirtualBox
+- pfSense CE ISO
+- Ubuntu Server 22.04 ISO
+- Wazuh (installed inside a VM, not on Kali)
+
+Cost: $0.
+
+---
+
+## Part 3 — Build Order
+
+Follow these steps in order. Do not skip. Each step assumes the previous ones are done.
+
+---
+
+### Step 1 — Install VirtualBox on Kali
+
+Open a terminal on Kali.
+
+Run:
+
+```
+sudo apt update
+sudo apt install -y virtualbox virtualbox-ext-pack
+sudo apt install -y linux-headers-$(uname -r)
+sudo /sbin/vboxconfig
+```
+
+Verify:
+
+```
+virtualbox --help
+```
+
+You should see usage output. Open VirtualBox from the application menu and confirm the GUI loads.
+
+---
+
+### Step 2 — Download the ISOs
+
+**pfSense:**
+
+Go to pfsense.org/download.
+
+Choose AMD64, DVD Image (ISO) Installer, and a mirror near you.
+
+The file downloads as `.iso.gz`. Decompress:
+
+```
+cd ~/Downloads
+gunzip pfSense-CE-*.iso.gz
+```
+
+**Ubuntu Server 22.04:**
+
+Go to ubuntu.com/download/server. Download the 22.04 LTS ISO.
+
+Verify both:
+
+```
+ls -lh ~/Downloads/*.iso
+```
+
+---
+
+### Step 3 — Create the pfSense VM
+
+Open VirtualBox. Click New.
+
+Name: pfSense
+Type: BSD
+Version: FreeBSD (64-bit)
+
+Memory: 1024 MB.
+
+Hard disk: Create a virtual hard disk now. VDI. Dynamically allocated. 20 GB.
+
+Click Create.
+
+Select the pfSense VM. Click Settings.
+
+System: Boot Order — Optical first, then Hard Disk.
+
+Network:
+- Adapter 1: enable, Attached to NAT.
+- Adapter 2: enable, Attached to Internal Network, Name: labnet.
+
+Storage: under Controller IDE, click the empty CD icon, then the disk icon on the right, choose "Choose a disk file," select the pfSense ISO.
+
+Click OK.
+
+---
+
+### Step 4 — Install pfSense
+
+Start the pfSense VM.
+
+Accept the default boot option.
+
+Follow the installer:
+- Accept license.
+- Install.
+- Choose UFS.
+- Confirm disk.
+- Wait.
+- Reboot.
+
+After reboot, the interface assignment wizard runs:
+
+- VLANs needed? Type n.
+- WAN interface: type em0.
+- LAN interface: type em1.
+
+The console shows LAN is 192.168.1.1.
+
+Open a browser (from Kali, using the pfSense console link if needed) to https://192.168.1.1. Accept the certificate warning.
+
+Log in: admin / pfsense.
+
+Run the setup wizard:
+- Hostname: pfsense
+- Domain: lab.local
+- Set a new admin password. Save it.
+- Timezone: your timezone.
+- WAN: accept defaults (it pulls from NAT).
+- LAN: accept defaults.
+- Reload.
+
+The pfSense dashboard loads with both WAN and LAN up.
+
+Donot add firewall rules yet.
+
+
+### Step 5 — Create the Wazuh VM
+
+Open VirtualBox. Click New.
+
+Name: Wazuh
+Type: Linux
+Version: Ubuntu (64-bit)
+
+Memory: 4096 MB.
+
+Hard disk: VDI, dynamically allocated, 50 GB.
+
+Click Create.
+
+Select the Wazuh VM. Click Settings.
+
+System: Boot Order — Optical first.
+
+Network: Adapter 1, Internal Network, labnet.
+
+Storage: mount the Ubuntu Server ISO.
+
+Click OK.
+
+---
+
+### Step 6 — Install Ubuntu Server for Wazuh
+
+Start the Wazuh VM.
+
+Follow the installer:
+- Language: English.
+- Install Ubuntu Server.
+- Keyboard layout.
+- Network: accept DHCP. Note the IP it gets.
+- Proxy: leave empty.
+- Mirror: accept default.
+- Storage: entire disk, default layout. Confirm.
+- Username: wazuh
+- Hostname: wazuh
+- Password: strong. Save it.
+- Skip Ubuntu Pro.
+- Do not install snaps.
+- Wait for install.
+- Reboot.
+
+Log in.
+
+Set a static IP of 192.168.1.10:
+
+```
+sudo nano /etc/netplan/00-installer-config.yaml
+```
+
+Replace contents with:
+
+```
+network:
+  version: 2
+  ethernets:
+    enp0s3:
+      dhcp4: no
+      addresses:
+        - 192.168.1.10/24
+      routes:
+        - to: default
+          via: 192.168.1.1
+      nameservers:
+        addresses: [192.168.1.1]
+```
+
+Apply:
+
+```
+sudo netplan apply
+```
+
+Verify:
+
+```
+ip a
+```
+
+The VM should now have 192.168.1.10.
+
+Test connectivity:
+
+```
+ping -c 3 192.168.1.1
+```
+
+You should see replies from pfSense.
+
+**Do not install Wazuh yet.**
+
+---
+
+### Step 7 — Create the Target VM
+
+Open VirtualBox. Click New.
+
+Name: Target
+Type: Linux
+Version: Ubuntu (64-bit)
+
+Memory: 1024 MB.
+
+Hard disk: VDI, dynamically allocated, 10 GB.
+
+Click Create.
+
+Select the Target VM. Click Settings.
+
+System: Boot Order — Optical first.
+
+Network: Adapter 1, Internal Network, labnet.
+
+Storage: mount the Ubuntu Server ISO.
+
+Click OK.
+
+---
+
+### Step 8 — Install Ubuntu Server for the Target
+
+Start the Target VM.
+
+Follow the same installer steps as Step 6, with these differences:
+- Username: target
+- Hostname: target
+- Password: different from Wazuh. Save it.
+
+After reboot, log in.
+
+Set a static IP of 192.168.1.20 using the same netplan method, replacing the address with 192.168.1.20.
+
+Apply:
+
+```
+sudo netplan apply
+```
+
+Verify:
+
+```
+ip a
+```
+
+Test connectivity to pfSense:
+
+```
+ping -c 3 192.168.1.1
+```
+
+Test connectivity to Wazuh:
+
+```
+ping -c 3 192.168.1.10
+```
+
+Both should succeed.
+
+**Do not install the Wazuh agent yet.**
+
+---
+
+### Step 9 — Add a Host-Only Adapter to pfSense for Kali
+
+In VirtualBox, select the pfSense VM. Click Settings.
+
+Network: enable Adapter 3.
+
+Attached to: Host-only Adapter.
+
+Name: vboxnet0.
+
+Click OK.
+
+Start pfSense.
+
+From the pfSense console menu, choose option 1 to assign interfaces.
+
+Add OPT1 to the new interface (likely em2).
+
+Assign it.
+
+From the pfSense console, choose option 2 to set interface IP addresses.
+
+Set OPT1 to 192.168.56.1/24.
+
+Enable DHCP on OPT1 with range 192.168.56.100 to 192.168.56.200.
+
+On Kali, check vboxnet0:
+
+```
+ip a
+```
+
+You should see 192.168.56.1 on vboxnet0.
+
+Kali can now reach the lab network through pfSense.
+
+---
+
+### Step 10 — Verify the Full Infrastructure
+
+From Kali:
+
+```
+ping -c 3 192.168.56.1
+```
+
+This is pfSense's OPT1 interface.
+
+From Kali, reach the Wazuh VM through pfSense:
+
+```
+ping -c 3 192.168.1.10
+```
+
+If it does not respond, the issue is routing or pfSense firewall rules on OPT1. For this phase, temporarily allow all traffic on OPT1 to confirm the infrastructure works. You will tighten the rules in the next phase.
+
+From Kali, reach the Target:
+
+```
+ping -c 3 192.168.1.20
+```
+
+From the Wazuh VM:
+
+```
+ping -c 3 192.168.1.20
+ping -c 3 192.168.1.1
+```
+
+From the Target VM:
+
+```
+ping -c 3 192.168.1.10
+ping -c 3 192.168.1.1
+```
+
+All pings should succeed. If they do, the infrastructure is complete.
+
+---
+
+## Part 4 — What the Lab Looks Like Now
+
+At the end of this phase:
+
+- VirtualBox is installed on Kali.
+- pfSense is running with WAN (NAT) and LAN (labnet).
+- Wazuh VM is running Ubuntu Server at 192.168.1.10 on labnet.
+- Target VM is running Ubuntu Server at 192.168.1.20 on labnet.
+- Kali reaches the lab through pfSense's OPT1 at 192.168.56.1.
+- All machines can ping each other.
+- No rules, no agents, no logs yet.
+
+This is the foundation.
+
+---
+
+## Part 5 — What Comes in the Next Phase
+
+Later you will:
+
+- Install Wazuh on the Wazuh VM.
+- Install the Wazuh agent on the Target VM.
+- Configure pfSense to send logs to Wazuh.
+- Write firewall rules on pfSense.
+- Run attacks from Kali.
+- Observe alerts in Wazuh.
+- Practice detection and response.
+
+None of that is part of this phase.
+
+---
+
+## Part 6 — Deliverables for This Phase
+
+- VirtualBox installed and working on Kali.
+- pfSense VM running with WAN and LAN.
+- Wazuh VM running at 192.168.1.10.
+- Target VM running at 192.168.1.20.
+- Kali connected to labnet through pfSense OPT1 at 192.168.56.1.
+- Ping success from every machine to every other machine.
+- Screenshots of the pfSense dashboard.
+- Screenshots of `ip a` on each VM.
+- Screenshots of successful pings.
+
+---
+
+## Part 7 — Progress Log
+
+2026-10-01
+Project spec written. Infrastructure-only scope defined.
+
+Add entries as you build. Example:
+
+2026-10-02
+VirtualBox installed on Kali. Kernel modules built.
+
+2026-10-03
+pfSense VM created. Installer completed. Web interface reachable.
+
+2026-10-04
+Wazuh VM installed with static IP 192.168.1.10.
+
+2026-10-05
+Target VM installed with static IP 192.168.1.20.
+
+2026-10-06
+OPT1 added to pfSense. Kali reaches labnet. All pings successful.
+
+
+## Part 8 — Next Action
+
+Begin with Step 1. Install VirtualBox on Kali.
+
+Report back after each step. we will verify the output before moving to the next one.
